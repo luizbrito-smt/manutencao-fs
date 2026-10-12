@@ -441,13 +441,24 @@ html[data-theme="light"] .inspection-progress,html[data-theme="light"] .grupo-ca
 /* Dashboard sem gráfico Status das inspeções */
 .dashboard-main-grid.dashboard-main-grid-single{grid-template-columns:1fr!important;}
 .dashboard-main-grid.dashboard-main-grid-single .dash-panel{width:100%;}
+
+.auth-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:linear-gradient(145deg,#081722,#12352a)}
+.auth-screen[hidden],#app[hidden],.auth-top[hidden]{display:none!important}
+.auth-panel{width:min(100%,420px);padding:34px;border-radius:18px;background:#142433;border:1px solid #365446;box-shadow:0 24px 70px #0007;color:#fff}
+.auth-panel h1{text-align:center;margin:0 0 8px;font-size:25px}.auth-panel p{text-align:center;color:#b9c7cf;margin:0 0 25px}.auth-symbol{text-align:center;font-size:38px;margin-bottom:10px}
+.auth-panel label{display:block;margin:15px 0 6px;font-size:13px;font-weight:650}.auth-panel input{display:block;width:100%;padding:13px;border:1px solid #536273;border-radius:9px;background:#0d1b28;color:#fff;font-size:15px}
+.auth-panel button{width:100%;padding:14px;margin-top:23px;border:0;border-radius:9px;background:#22c55e;color:#062414;font-size:16px;font-weight:750;cursor:pointer}#authMessage{color:#fca5a5;margin-top:14px;font-size:13px;line-height:1.5}
+.auth-top{background:#0c1a26;color:#e5f5eb;display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:7px 22px;font-size:12px}.auth-top button{background:#223746;color:white;border:1px solid #526472;border-radius:6px;padding:6px 12px;cursor:pointer}
 </style>
 </head>
 <body>
-<div id="app"></div>
+<div id="authScreen" class="auth-screen"><form id="authForm" class="auth-panel"><div class="auth-symbol">🔒</div><h1>MANUTENÇÃO FS</h1><p>Acesse com sua conta autorizada no Firebase.</p><label for="authEmail">E-mail</label><input id="authEmail" type="email" autocomplete="username" required placeholder="seu.email@empresa.com"><label for="authPassword">Senha</label><input id="authPassword" type="password" autocomplete="current-password" required placeholder="Sua senha"><button id="authSubmit" type="submit">Entrar no aplicativo</button><div id="authMessage" role="alert"></div></form></div>
+<div id="authTop" class="auth-top" hidden><span id="authUser"></span><button id="authLogout" type="button">Sair</button></div>
+<div id="app" hidden></div>
 <div id="toast" class="toast"></div>
 <script src="https://www.gstatic.com/firebasejs/12.3.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.3.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.3.0/firebase-auth-compat.js"></script>
 <script>
 window.FIREBASE_CONFIG = {
   apiKey: "AIzaSyDLGDJqsun0L0NTgb0i_EbahXanxtLdwEA",
@@ -780,6 +791,8 @@ function uid(){ return Date.now().toString(36) + Math.random().toString(36).slic
 var firebaseDb = null;
 var firebaseOnline = false;
 var firebaseListenersStarted = false;
+var firebaseRefs = [];
+var authReady = false;
 
 function firebaseConfigOk(){
   var c = window.FIREBASE_CONFIG || {};
@@ -820,42 +833,26 @@ async function localSet(key,val){
 }
 
 async function storageGet(key){
-  // Preferência de tema é individual de cada aparelho.
   if(key === STORE_THEME) return localGet(key);
-  if(firebaseDb){
-    try{
-      var snap = await firebaseDb.ref('appData/'+key).once('value');
-      var remote = snap.val();
-      if(remote !== null && remote !== undefined) return remote;
-      // Primeira publicação: migra dados locais existentes para o Firebase.
-      var local = await localGet(key);
-      if(local !== null && local !== undefined){
-        await firebaseDb.ref('appData/'+key).set(local);
-        return local;
-      }
-      return null;
-    }catch(e){
-      console.error('Firebase read failed', key, e);
-      return localGet(key);
-    }
-  }
-  return localGet(key);
+  if(!firebase.auth().currentUser) throw new Error('Sessão não autenticada');
+  // Nunca sobrescrever a base remota com cache local ao encontrar um nó vazio.
+  var snap = await firebaseDb.ref('appData/'+key).once('value');
+  return snap.val();
 }
 
 async function storageSet(key,val){
   if(key === STORE_THEME) return localSet(key,val);
-  await localSet(key,val); // cache/fallback deste aparelho
-  if(firebaseDb){
-    try{
-      await firebaseDb.ref('appData/'+key).set(val);
-      return true;
-    }catch(e){
-      console.error('Firebase write failed', key, e);
-      toast('Sem conexão com o Firebase · alteração salva neste aparelho');
-      return false;
-    }
-  }
-  return true;
+  if(!firebaseDb || !firebase.auth().currentUser){toast('Faça login para salvar alterações');return false;}
+  try{
+    await firebaseDb.ref('appData/'+key).set(val);
+    await localSet(key,val);
+    return true;
+  }catch(e){console.error('Firebase write failed',key,e);toast('Erro ao salvar no Firebase. Verifique sua conexão e permissões.');return false;}
+}
+
+function stopFirebaseListeners(){
+  firebaseRefs.forEach(function(ref){ref.off('value');});
+  firebaseRefs=[];firebaseListenersStarted=false;
 }
 
 function startFirebaseListeners(){
@@ -867,7 +864,9 @@ function startFirebaseListeners(){
   map[STORE_PEND] = 'pendencias';
   map[STORE_CHAMADOS] = 'chamados';
   Object.keys(map).forEach(function(key){
-    firebaseDb.ref('appData/'+key).on('value', function(snap){
+    var ref = firebaseDb.ref('appData/'+key);
+    firebaseRefs.push(ref);
+    ref.on('value', function(snap){
       var val = snap.val();
       if(val === null || val === undefined) val = [];
       state[map[key]] = val;
@@ -880,7 +879,6 @@ function startFirebaseListeners(){
 }
 
 async function loadAll(){
-  initFirebase();
   var eq = await storageGet(STORE_EQUIP);
   var insp = await storageGet(STORE_INSP);
   var pend = await storageGet(STORE_PEND);
@@ -1766,9 +1764,41 @@ function openNovaPendSheet(){
 }
 
 // ================= INIT =================
-(async function init(){
-  await loadAll();
-  render();
+(function init(){
+  var screen=document.getElementById('authScreen');
+  var app=document.getElementById('app');
+  var bar=document.getElementById('authTop');
+  var message=document.getElementById('authMessage');
+  var submit=document.getElementById('authSubmit');
+  function showLogin(){
+    stopFirebaseListeners();state.loaded=false;
+    state.equipamentos=[];state.inspecoes=[];state.pendencias=[];state.chamados=[];
+    app.hidden=true;bar.hidden=true;screen.hidden=false;
+    document.getElementById('authPassword').value='';
+  }
+  if(!initFirebase() || !firebase.auth){message.textContent='Falha ao inicializar o Firebase. Verifique a conexão.';return;}
+  document.getElementById('authForm').addEventListener('submit',async function(e){
+    e.preventDefault();message.textContent='';submit.disabled=true;submit.textContent='Entrando...';
+    try{await firebase.auth().signInWithEmailAndPassword(document.getElementById('authEmail').value.trim(),document.getElementById('authPassword').value);}
+    catch(err){console.error('Login failed',err);message.textContent='Não foi possível entrar. Verifique e-mail, senha e se a conta está habilitada.';}
+    finally{submit.disabled=false;submit.textContent='Entrar no aplicativo';}
+  });
+  document.getElementById('authLogout').addEventListener('click',function(){firebase.auth().signOut();});
+  firebase.auth().onAuthStateChanged(async function(user){
+    if(!user){showLogin();return;}
+    screen.hidden=true;bar.hidden=false;app.hidden=true;
+    document.getElementById('authUser').textContent=user.email||'Usuário autenticado';
+    try{
+      stopFirebaseListeners();
+      await loadAll();
+      if(firebase.auth().currentUser!==user)return;
+      app.hidden=false;render();message.textContent='';
+    }catch(err){
+      console.error('Data loading failed',err);
+      showLogin();
+      message.textContent='Login realizado, mas não foi possível carregar os dados. Confira se as regras do Realtime Database foram publicadas e se este usuário tem acesso. Nenhum dado foi apagado.';
+    }
+  },function(err){console.error(err);showLogin();message.textContent='Erro de autenticação. Atualize a página e tente novamente.';});
 })();
 </script>
 </body>
